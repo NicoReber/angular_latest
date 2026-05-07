@@ -11,8 +11,8 @@ import { BookingResult, ResolutionRow } from './booking.models';
     <article class="panel step-panel">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Step 3</p>
-          <h2>Review and release booking</h2>
+          <p class="eyebrow">Schritt 3</p>
+          <h2>Alles prüfen und abschicken (Daumen drücken!)</h2>
         </div>
       </div>
 

@@ -11,8 +11,8 @@ import { ResolutionRow } from './booking.models';
     <article class="panel step-panel">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Step 2</p>
-          <h2>Resolve one order line per EAN</h2>
+          <p class="eyebrow">Schritt 2</p>
+          <h2>Chaos auflösen (eine Bestellzeile pro EAN)</h2>
         </div>
         <span class="status-pill accent"
           >{{ mappedCount() }}/{{ ambiguousRows().length }} mapped</span

@@ -11,8 +11,8 @@ import { ImportParseError } from './booking.models';
     <article class="panel step-panel">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Step 1</p>
-          <h2>Import EAN quantities</h2>
+          <p class="eyebrow">Schritt 1</p>
+          <h2>Pausenbrot-Liste einfügen</h2>
         </div>
       </div>
 

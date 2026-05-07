@@ -172,18 +172,18 @@ export class App {
     return [
       {
         id: 1 as WorkflowStepId,
-        title: 'Import',
+        title: 'Einfügen',
         summary:
           this.importRows().length > 0
             ? `${this.importSummaries().length} EANs`
-            : 'Paste import rows',
+            : 'Pausenbrot-Liste einfügen',
         state: activeStep === 1 ? 'current' : 1 < activeStep ? 'complete' : 'available',
         disabled: false,
       },
       {
         id: 2 as WorkflowStepId,
-        title: 'Map EANs',
-        summary: `${this.ambiguousResolutionRows().length} ambiguous EANs`,
+        title: 'Chaos lösen',
+        summary: `${this.ambiguousResolutionRows().length} unklare EANs`,
         state:
           activeStep === 2
             ? 'current'
@@ -196,11 +196,11 @@ export class App {
       },
       {
         id: 3 as WorkflowStepId,
-        title: 'Book',
+        title: 'Abschicken',
         summary:
           this.bookingResult() !== null
-            ? 'Mock booking completed'
-            : `${this.filteredOrderLines().length} matching lines`,
+            ? 'Scheinbuchung erledigt 🎉'
+            : `${this.filteredOrderLines().length} passende Zeilen`,
         state: activeStep === 3 ? 'current' : maxUnlockedStep >= 3 ? 'available' : 'locked',
         disabled: maxUnlockedStep < 3,
       },
