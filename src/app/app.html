@@ -218,7 +218,7 @@
       <div class="panel-card">
         <div class="panel-card-title">Players</div>
         @for (p of players(); track p.id) {
-          <div class="player-row" [class.active-player]="p.id === currentPlayer()!.id" [class.bankrupt]="p.isBankrupt">
+          <div class="player-row" [class.active-player]="p.id === currentPlayer()?.id" [class.bankrupt]="p.isBankrupt">
             <div class="player-token-sm" [style.background]="tokenBg(p.color)"></div>
             <div class="player-row-info">
               <span class="player-row-name">{{ p.name }}</span>

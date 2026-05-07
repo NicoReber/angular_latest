@@ -52,7 +52,9 @@ export class App {
   private readonly ccDeck = signal<Card[]>([]);
 
   // ─── Computed ─────────────────────────────────────────────────────────────
-  protected readonly currentPlayer = computed(() => this.players()[this.currentIdx()] ?? null);
+  protected readonly currentPlayer = computed<Player | null>(
+    () => this.players()[this.currentIdx()] ?? null,
+  );
 
   protected readonly activePlayers = computed(() => this.players().filter((p) => !p.isBankrupt));
 
@@ -228,7 +230,7 @@ export class App {
     this.handleLanding(playerId, newPos, false);
   }
 
-  private handleLanding(playerId: number, pos: number, rolledDoubles: boolean): void {
+  private handleLanding(playerId: number, pos: number, _rolledDoubles: boolean): void {
     const space = BOARD[pos];
     const player = this.players().find((p) => p.id === playerId)!;
 
@@ -288,9 +290,6 @@ export class App {
         this.phase.set('post_roll');
         break;
     }
-
-    // Unused parameter kept to signal caller intent; suppress TS warning
-    void rolledDoubles;
   }
 
   // ─── Properties ───────────────────────────────────────────────────────────
@@ -566,27 +565,35 @@ export class App {
   }
 
   // ─── Board grid helpers ───────────────────────────────────────────────────
+  // Board corners (space IDs): Go=0, Jail=10, FreeParking=20, GoToJail=30
+  private static readonly GRID_SIZE = 11; // 11×11 CSS grid
+  private static readonly CORNER_IDS = [0, 10, 20, 30] as const;
+  private static readonly BOTTOM_ROW_END = 10;  // IDs 0–10 on the bottom row
+  private static readonly LEFT_COL_END = 19;    // IDs 11–19 on the left column
+  private static readonly TOP_ROW_END = 30;     // IDs 20–30 on the top row
+  // IDs 31–39 on the right column
+
   private spaceRow(id: number): number {
-    if (id <= 10) return 11;           // bottom row
-    if (id <= 19) return 10 - (id - 11); // left col: 10 down to 2
-    if (id <= 30) return 1;            // top row
-    return id - 29;                    // right col: 2 up to 10
+    if (id <= App.BOTTOM_ROW_END) return App.GRID_SIZE;    // bottom row → grid row 11
+    if (id <= App.LEFT_COL_END) return 10 - (id - 11);    // left col  → rows 10 down to 2
+    if (id <= App.TOP_ROW_END) return 1;                   // top row   → grid row 1
+    return id - 29;                                        // right col → rows 2 up to 10
   }
 
   private spaceCol(id: number): number {
-    if (id === 0) return 11;           // Go: bottom-right corner
-    if (id <= 9) return 11 - id;       // bottom row: col 10 down to 2
-    if (id <= 20) return 1;            // left col (incl. corners 10, 20)
-    if (id <= 29) return id - 19;      // top row: col 2 up to 10
-    if (id === 30) return 11;          // Go to Jail: top-right corner
-    return 11;                         // right col
+    if (id === 0) return App.GRID_SIZE;                    // Go: bottom-right corner (col 11)
+    if (id <= 9) return App.GRID_SIZE - id;                // bottom row: col 10 down to 2
+    if (id <= 20) return 1;                                // left col (incl. corners 10, 20)
+    if (id <= 29) return id - 19;                          // top row: col 2 up to 10
+    if (id === App.TOP_ROW_END) return App.GRID_SIZE;      // Go to Jail: top-right (col 11)
+    return App.GRID_SIZE;                                  // right col
   }
 
   private spaceSide(id: number): RenderedSpace['side'] {
-    if (id === 0 || id === 10 || id === 20 || id === 30) return 'corner';
-    if (id <= 9) return 'bottom';
-    if (id <= 19) return 'left';
-    if (id <= 29) return 'top';
+    if ((App.CORNER_IDS as readonly number[]).includes(id)) return 'corner';
+    if (id <= App.BOTTOM_ROW_END) return 'bottom';
+    if (id <= App.LEFT_COL_END) return 'left';
+    if (id <= App.TOP_ROW_END) return 'top';
     return 'right';
   }
 
