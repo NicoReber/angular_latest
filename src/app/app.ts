@@ -1,299 +1,635 @@
 import { ChangeDetectionStrategy, Component, computed, signal } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
-import { FormControl } from '@angular/forms';
 
-import { DEFAULT_IMPORT_TEXT, MOCK_ORDER, MOCK_ORDER_LINES } from './booking.mock-data';
-import { BookingStepComponent } from './booking-step.component';
+import { BoardSpace, Card, GamePhase, Player, PlayerColor, RentInfo } from './game.models';
 import {
-  BookingLine,
-  BookingResult,
-  ImportParseError,
-  ImportRow,
-  ImportSummary,
-  ResolutionRow,
-  WorkflowStepId,
-} from './booking.models';
-import { ImportStepComponent } from './import-step.component';
-import { MappingStepComponent } from './mapping-step.component';
+  BOARD,
+  CHANCE_CARDS,
+  COLOR_GROUPS,
+  COMMUNITY_CHEST_CARDS,
+  RAILROAD_IDS,
+  UTILITY_IDS,
+  createShuffledDeck,
+} from './game.data';
 
-import { TestEnum } from './test.enum';
+type RenderedSpace = BoardSpace & {
+  gridRow: number;
+  gridCol: number;
+  side: 'top' | 'bottom' | 'left' | 'right' | 'corner';
+  occupants: Player[];
+  ownerId: number;
+  ownerColor: PlayerColor | null;
+};
 
 @Component({
   selector: 'app-root',
-  imports: [ImportStepComponent, MappingStepComponent, BookingStepComponent],
+  imports: [],
   templateUrl: './app.html',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class App {
-  protected readonly activeStep = signal<WorkflowStepId>(1);
-  protected readonly orderLines = signal(MOCK_ORDER_LINES);
-  protected readonly importControl = new FormControl(DEFAULT_IMPORT_TEXT, {
-    nonNullable: true,
-  });
-  protected readonly importText = toSignal(this.importControl.valueChanges, {
-    initialValue: this.importControl.getRawValue(),
-  });
-  protected readonly manualSelections = signal<Record<string, string>>({});
-  protected readonly bookingResult = signal<BookingResult | null>(null);
+  // ─── Constants ────────────────────────────────────────────────────────────
+  protected readonly BOARD = BOARD;
+  protected readonly PLAYER_COLORS: PlayerColor[] = ['red', 'blue', 'green', 'yellow'];
 
-  protected readonly parseState = computed(() => this.parseImportText(this.importText()));
-  protected readonly importRows = computed(() => this.parseState().rows);
-  protected readonly parseErrors = computed(() => this.parseState().errors);
+  // ─── Setup ────────────────────────────────────────────────────────────────
+  protected readonly setupCount = signal(2);
+  protected readonly setupNames = signal(['Alice', 'Bob', 'Charlie', 'Dave']);
 
-  protected readonly importSummaries = computed<ImportSummary[]>(() => {
-    const grouped = new Map<string, ImportSummary>();
+  // ─── Core state ───────────────────────────────────────────────────────────
+  protected readonly players = signal<Player[]>([]);
+  protected readonly owned = signal<Record<number, number>>({});
+  protected readonly phase = signal<GamePhase>('setup');
+  protected readonly currentIdx = signal(0);
+  protected readonly dice = signal<[number, number] | null>(null);
+  protected readonly consecutiveDoubles = signal(0);
+  protected readonly log = signal<string[]>([]);
+  protected readonly pendingCard = signal<Card | null>(null);
+  protected readonly pendingRent = signal<RentInfo | null>(null);
+  protected readonly winner = signal<Player | null>(null);
 
-    for (const row of this.importRows()) {
-      const current = grouped.get(row.ean);
+  private readonly lastDiceSum = signal(0);
+  private readonly chanceDeck = signal<Card[]>([]);
+  private readonly ccDeck = signal<Card[]>([]);
 
-      if (current) {
-        current.totalQuantity += row.quantity;
-        current.sourceRows.push(row.rowNumber);
-        continue;
-      }
+  // ─── Computed ─────────────────────────────────────────────────────────────
+  protected readonly currentPlayer = computed<Player | null>(
+    () => this.players()[this.currentIdx()] ?? null,
+  );
 
-      grouped.set(row.ean, {
-        ean: row.ean,
-        totalQuantity: row.quantity,
-        sourceRows: [row.rowNumber],
-      });
-    }
+  protected readonly activePlayers = computed(() => this.players().filter((p) => !p.isBankrupt));
 
-    return Array.from(grouped.values()).sort((left, right) => left.ean.localeCompare(right.ean));
-  });
-
-  protected readonly filteredOrderLines = computed(() => {
-    const requestedEans = new Set(this.importSummaries().map((row) => row.ean));
-    return this.orderLines().filter((line) => requestedEans.has(line.ean));
+  protected readonly rolledDoubles = computed(() => {
+    const d = this.dice();
+    return d !== null && d[0] === d[1];
   });
 
-  protected readonly resolutionRows = computed<ResolutionRow[]>(() => {
-    const selections = this.manualSelections();
-
-    return this.importSummaries().map((summary) => {
-      const candidates = this.orderLines().filter((line) => line.ean === summary.ean);
-      const selectedLineId =
-        selections[summary.ean] ?? (candidates.length === 1 ? candidates[0].id : null);
-      const selectedLine = candidates.find((line) => line.id === selectedLineId) ?? null;
-
-      return {
-        ean: summary.ean,
-        requestedQuantity: summary.totalQuantity,
-        candidates,
-        selectedLineId,
-        selectedLine,
-        sourceRows: summary.sourceRows,
-        requiresManualSelection: candidates.length > 1,
-      };
-    });
-  });
-
-  protected readonly ambiguousResolutionRows = computed(() => {
-    return this.resolutionRows().filter((row) => row.candidates.length > 1);
-  });
-
-  protected readonly mappedCount = computed(() => {
-    return this.ambiguousResolutionRows().filter((row) => row.selectedLineId).length;
-  });
-
-  protected readonly blockers = computed(() => {
-    return this.resolutionRows().flatMap((row) => {
-      if (row.candidates.length === 0) {
-        return [`${row.ean}: no matching order line found in ${MOCK_ORDER.id}`];
-      }
-
-      if (!row.selectedLineId) {
-        return [`${row.ean}: multiple order lines available, manual selection required`];
-      }
-
-      if (row.selectedLine && row.requestedQuantity > row.selectedLine.openQuantity) {
-        return [
-          `${row.ean}: requested ${row.requestedQuantity} exceeds open quantity ${row.selectedLine.openQuantity} on ${row.selectedLine.id}`,
-        ];
-      }
-
-      return [];
-    });
-  });
-
-  protected readonly readyToBook = computed(() => {
-    if (this.parseErrors().length > 0 || this.resolutionRows().length === 0) {
-      return false;
-    }
-
-    return this.resolutionRows().every((row) => !!row.selectedLineId && row.candidates.length > 0);
-  });
-
-  protected readonly bookingPayload = computed<BookingLine[]>(() => {
-    if (!this.readyToBook() || this.blockers().length > 0) {
-      return [];
-    }
-
-    return this.resolutionRows().map((row) => ({
-      ean: row.ean,
-      quantity: row.requestedQuantity,
-      orderLineId: row.selectedLineId!,
+  protected readonly boardSpaces = computed<RenderedSpace[]>(() => {
+    const owned = this.owned();
+    const players = this.players();
+    return BOARD.map((space) => ({
+      ...space,
+      gridRow: this.spaceRow(space.id),
+      gridCol: this.spaceCol(space.id),
+      side: this.spaceSide(space.id),
+      occupants: players.filter((p) => p.position === space.id && !p.isBankrupt),
+      ownerId: owned[space.id] ?? -1,
+      ownerColor: owned[space.id] !== undefined ? (players[owned[space.id]]?.color ?? null) : null,
     }));
   });
 
-  protected readonly bookingSummary = computed(() => {
-    const payload = this.bookingPayload();
+  // ─── Setup actions ────────────────────────────────────────────────────────
+  protected setCount(n: number): void {
+    this.setupCount.set(n);
+  }
 
-    return {
-      lineCount: payload.length,
-      totalQuantity: payload.reduce((sum, line) => sum + line.quantity, 0),
-    };
-  });
-
-  protected readonly canContinueFromImport = computed(() => {
-    return this.parseErrors().length === 0 && this.importRows().length > 0;
-  });
-
-  protected readonly canContinueFromMapping = computed(() => {
-    return this.ambiguousResolutionRows().every((row) => !!row.selectedLineId);
-  });
-
-  protected readonly maxUnlockedStep = computed<WorkflowStepId>(() => {
-    if (this.canContinueFromMapping()) {
-      return 3;
-    }
-
-    if (this.canContinueFromImport()) {
-      return 2;
-    }
-
-    return 1;
-  });
-
-  protected readonly stepCards = computed(() => {
-    const activeStep = this.activeStep();
-    const maxUnlockedStep = this.maxUnlockedStep();
-
-    return [
-      {
-        id: 1 as WorkflowStepId,
-        title: 'Import',
-        summary:
-          this.importRows().length > 0
-            ? `${this.importSummaries().length} EANs`
-            : 'Paste import rows',
-        state: activeStep === 1 ? 'current' : 1 < activeStep ? 'complete' : 'available',
-        disabled: false,
-      },
-      {
-        id: 2 as WorkflowStepId,
-        title: 'Map EANs',
-        summary: `${this.ambiguousResolutionRows().length} ambiguous EANs`,
-        state:
-          activeStep === 2
-            ? 'current'
-            : 2 < activeStep
-              ? 'complete'
-              : maxUnlockedStep >= 2
-                ? 'available'
-                : 'locked',
-        disabled: maxUnlockedStep < 2,
-      },
-      {
-        id: 3 as WorkflowStepId,
-        title: 'Book',
-        summary:
-          this.bookingResult() !== null
-            ? 'Mock booking completed'
-            : `${this.filteredOrderLines().length} matching lines`,
-        state: activeStep === 3 ? 'current' : maxUnlockedStep >= 3 ? 'available' : 'locked',
-        disabled: maxUnlockedStep < 3,
-      },
-    ];
-  });
-
-  constructor() {
-    this.importControl.valueChanges.subscribe(() => {
-      this.manualSelections.set({});
-      this.bookingResult.set(null);
-
-      if (this.activeStep() > 1) {
-        this.activeStep.set(1);
-      }
+  protected updateName(i: number, value: string): void {
+    this.setupNames.update((arr) => {
+      const copy = [...arr];
+      copy[i] = value;
+      return copy;
     });
   }
 
-  protected goToStep(step: WorkflowStepId): void {
-    if (step <= this.maxUnlockedStep()) {
-      this.activeStep.set(step);
+  protected startGame(): void {
+    const count = this.setupCount();
+    const colors: PlayerColor[] = ['red', 'blue', 'green', 'yellow'];
+    const players: Player[] = this.setupNames()
+      .slice(0, count)
+      .map((name, i) => ({
+        id: i,
+        name: name.trim() || `Player ${i + 1}`,
+        color: colors[i],
+        money: 1500,
+        position: 0,
+        inJail: false,
+        jailTurns: 0,
+        isBankrupt: false,
+        ownedProperties: [],
+        getOutOfJailCards: 0,
+      }));
+
+    this.players.set(players);
+    this.owned.set({});
+    this.phase.set('pre_roll');
+    this.currentIdx.set(0);
+    this.dice.set(null);
+    this.consecutiveDoubles.set(0);
+    this.pendingCard.set(null);
+    this.pendingRent.set(null);
+    this.winner.set(null);
+    this.lastDiceSum.set(0);
+    this.chanceDeck.set(createShuffledDeck(CHANCE_CARDS));
+    this.ccDeck.set(createShuffledDeck(COMMUNITY_CHEST_CARDS));
+    this.log.set([
+      `🎲 Game started! Each player begins with $1,500.`,
+      `👤 It's ${players[0].name}'s turn.`,
+    ]);
+  }
+
+  // ─── Dice & movement ──────────────────────────────────────────────────────
+  protected rollDice(): void {
+    if (this.phase() !== 'pre_roll') return;
+
+    const die1 = Math.floor(Math.random() * 6) + 1;
+    const die2 = Math.floor(Math.random() * 6) + 1;
+    const total = die1 + die2;
+    const doubles = die1 === die2;
+
+    this.dice.set([die1, die2]);
+    this.lastDiceSum.set(total);
+
+    const player = this.currentPlayer()!;
+    this.addLog(
+      `${player.name} rolled ${die1} + ${die2} = ${total}${doubles ? ' 🎰 Doubles!' : ''}.`,
+    );
+
+    if (player.inJail) {
+      this.handleJailRoll(player.id, total, doubles);
+    } else {
+      if (doubles) {
+        const count = this.consecutiveDoubles() + 1;
+        if (count >= 3) {
+          this.addLog(`${player.name} rolled 3 consecutive doubles — Go directly to Jail!`);
+          this.consecutiveDoubles.set(0);
+          this.sendToJail(player.id);
+          this.phase.set('post_roll');
+          return;
+        }
+        this.consecutiveDoubles.set(count);
+      } else {
+        this.consecutiveDoubles.set(0);
+      }
+      this.doMove(player.id, total, true, doubles);
     }
   }
 
-  protected selectOrderLine(selection: { ean: string; orderLineId: string }): void {
-    this.manualSelections.update((current) => ({
-      ...current,
-      [selection.ean]: selection.orderLineId,
-    }));
-    this.bookingResult.set(null);
+  private handleJailRoll(playerId: number, total: number, doubles: boolean): void {
+    const player = this.players().find((p) => p.id === playerId)!;
+    if (doubles) {
+      this.addLog(`${player.name} rolled doubles and escaped jail!`);
+      this.updatePlayer(playerId, { inJail: false, jailTurns: 0 });
+      this.consecutiveDoubles.set(0);
+      this.doMove(playerId, total, true, false); // no extra roll after jail escape
+    } else {
+      const turns = player.jailTurns + 1;
+      if (turns >= 3) {
+        this.addLog(`${player.name} failed to roll doubles 3 times — pays $50 and moves.`);
+        this.updatePlayer(playerId, { inJail: false, jailTurns: 0 });
+        this.deductMoney(playerId, 50);
+        this.doMove(playerId, total, true, false);
+      } else {
+        this.addLog(`${player.name} stays in jail (${turns}/3 turns used).`);
+        this.updatePlayer(playerId, { jailTurns: turns });
+        this.consecutiveDoubles.set(0);
+        this.phase.set('post_roll');
+      }
+    }
   }
 
-  protected book(): void {
-    if (!this.readyToBook() || this.blockers().length > 0) {
+  private doMove(
+    playerId: number,
+    steps: number,
+    checkGo: boolean,
+    rolledDoubles: boolean,
+  ): void {
+    const player = this.players().find((p) => p.id === playerId)!;
+    const oldPos = player.position;
+    const newPos = (oldPos + steps + 40) % 40;
+
+    if (checkGo && newPos < oldPos && steps > 0) {
+      this.addLog(`${player.name} passed Go! Collect $200.`);
+      this.addMoney(playerId, 200);
+    }
+
+    this.updatePlayer(playerId, { position: newPos });
+    this.addLog(`${player.name} landed on ${BOARD[newPos].name}.`);
+    this.handleLanding(playerId, newPos, rolledDoubles);
+  }
+
+  private moveTo(playerId: number, target: number, collectGo: boolean): void {
+    const player = this.players().find((p) => p.id === playerId)!;
+    if (collectGo && target < player.position) {
+      this.addLog(`${player.name} passed Go! Collect $200.`);
+      this.addMoney(playerId, 200);
+    }
+    this.updatePlayer(playerId, { position: target });
+    this.addLog(`${player.name} moved to ${BOARD[target].name}.`);
+    this.handleLanding(playerId, target, false);
+  }
+
+  private moveBy(playerId: number, spaces: number): void {
+    const player = this.players().find((p) => p.id === playerId)!;
+    const oldPos = player.position;
+    const newPos = ((oldPos + spaces) % 40 + 40) % 40;
+    if (spaces > 0 && newPos < oldPos) {
+      this.addLog(`${player.name} passed Go! Collect $200.`);
+      this.addMoney(playerId, 200);
+    }
+    this.updatePlayer(playerId, { position: newPos });
+    this.addLog(`${player.name} moved to ${BOARD[newPos].name}.`);
+    this.handleLanding(playerId, newPos, false);
+  }
+
+  private handleLanding(playerId: number, pos: number, _rolledDoubles: boolean): void {
+    const space = BOARD[pos];
+    const player = this.players().find((p) => p.id === playerId)!;
+
+    switch (space.type) {
+      case 'go':
+        this.phase.set('post_roll');
+        break;
+
+      case 'property':
+      case 'railroad':
+      case 'utility': {
+        const ownerId = this.owned()[pos];
+        if (ownerId === undefined) {
+          this.phase.set('buy_prompt');
+        } else if (ownerId === playerId) {
+          this.addLog(`${player.name} owns ${space.name} — no rent due.`);
+          this.phase.set('post_roll');
+        } else {
+          const owner = this.players().find((p) => p.id === ownerId)!;
+          const rent = this.calcRent(pos, ownerId);
+          this.addLog(`${player.name} owes $${rent} rent to ${owner.name}.`);
+          this.pendingRent.set({ amount: rent, toPlayerId: ownerId, toPlayerName: owner.name });
+          this.payRent(playerId, ownerId, rent);
+        }
+        break;
+      }
+
+      case 'income_tax':
+        this.addLog(`${player.name} pays Income Tax: $${space.taxAmount}.`);
+        this.deductMoney(playerId, space.taxAmount!);
+        this.checkBankruptcy();
+        this.phase.set('post_roll');
+        break;
+
+      case 'luxury_tax':
+        this.addLog(`${player.name} pays Luxury Tax: $${space.taxAmount}.`);
+        this.deductMoney(playerId, space.taxAmount!);
+        this.checkBankruptcy();
+        this.phase.set('post_roll');
+        break;
+
+      case 'chance':
+        this.drawCard('chance', playerId);
+        break;
+
+      case 'community_chest':
+        this.drawCard('community_chest', playerId);
+        break;
+
+      case 'go_to_jail':
+        this.sendToJail(playerId);
+        this.phase.set('post_roll');
+        break;
+
+      default:
+        this.addLog(`${player.name} is just visiting.`);
+        this.phase.set('post_roll');
+        break;
+    }
+  }
+
+  // ─── Properties ───────────────────────────────────────────────────────────
+  protected buyProperty(): void {
+    if (this.phase() !== 'buy_prompt') return;
+    const player = this.currentPlayer()!;
+    const space = BOARD[player.position];
+    if (!space.price) return;
+
+    if (player.money < space.price) {
+      this.addLog(`${player.name} can't afford ${space.name} ($${space.price}).`);
+      this.phase.set('post_roll');
       return;
     }
 
-    this.bookingResult.set({
-      bookedAt: new Date().toISOString(),
-      orderId: MOCK_ORDER.id,
-      lines: this.bookingPayload(),
-    });
+    this.deductMoney(player.id, space.price);
+    this.owned.update((map) => ({ ...map, [space.id]: player.id }));
+    this.updatePlayer(player.id, { ownedProperties: [...player.ownedProperties, space.id] });
+    this.addLog(`${player.name} bought ${space.name} for $${space.price}! 🏠`);
+    this.phase.set('post_roll');
   }
 
-  private parseImportText(rawValue: string): { rows: ImportRow[]; errors: ImportParseError[] } {
-    const lines = rawValue
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    const rows: ImportRow[] = [];
-    const errors: ImportParseError[] = [];
-
-    lines.forEach((line, index) => {
-      const parts = line.split(',').map((part) => part.trim());
-
-      if (parts.length !== 2) {
-        errors.push({
-          lineNumber: index + 1,
-          message: 'Expected format EAN,quantity',
-        });
-        return;
-      }
-
-      const [ean, quantityRaw] = parts;
-
-      if (!/^\d{8,14}$/.test(ean)) {
-        errors.push({
-          lineNumber: index + 1,
-          message: `EAN \"${ean}\" must contain 8 to 14 digits`,
-        });
-        return;
-      }
-
-      const quantity = Number(quantityRaw);
-
-      if (!Number.isInteger(quantity) || quantity <= 0) {
-        errors.push({
-          lineNumber: index + 1,
-          message: `Quantity \"${quantityRaw}\" must be a positive integer`,
-        });
-        return;
-      }
-
-      rows.push({
-        rowNumber: index + 1,
-        ean,
-        quantity,
-      });
-    });
-
-    return { rows, errors };
+  protected declineBuy(): void {
+    const space = BOARD[this.currentPlayer()!.position];
+    this.addLog(`${this.currentPlayer()!.name} declined to buy ${space.name}.`);
+    this.phase.set('post_roll');
   }
 
-  logEnum(e: TestEnum): void {
-    console.log(e);
+  private payRent(fromId: number, toId: number, amount: number): void {
+    const payer = this.players().find((p) => p.id === fromId)!;
+    const actualPay = Math.min(amount, payer.money);
+    this.deductMoney(fromId, actualPay);
+    this.addMoney(toId, actualPay);
+    if (actualPay < amount) {
+      this.addLog(
+        `${payer.name} could only pay $${actualPay} (insufficient funds — bankrupt!).`,
+      );
+    }
+    this.checkBankruptcy();
+    this.phase.set('post_roll');
+    this.pendingRent.set(null);
+  }
+
+  private calcRent(spaceId: number, ownerId: number): number {
+    const space = BOARD[spaceId];
+    const owner = this.players().find((p) => p.id === ownerId)!;
+
+    if (space.type === 'railroad') {
+      const count = owner.ownedProperties.filter((id) => RAILROAD_IDS.includes(id)).length;
+      return 25 * Math.pow(2, count - 1);
+    }
+
+    if (space.type === 'utility') {
+      const count = owner.ownedProperties.filter((id) => UTILITY_IDS.includes(id)).length;
+      return this.lastDiceSum() * (count === 2 ? 10 : 4);
+    }
+
+    if (space.type === 'property' && space.color) {
+      const group = COLOR_GROUPS[space.color] ?? [];
+      const ownsAll = group.every((id) => owner.ownedProperties.includes(id));
+      return ownsAll ? (space.setRent ?? 0) : (space.baseRent ?? 0);
+    }
+
+    return 0;
+  }
+
+  // ─── Cards ────────────────────────────────────────────────────────────────
+  private drawCard(type: 'chance' | 'community_chest', playerId: number): void {
+    const deck = type === 'chance' ? this.chanceDeck : this.ccDeck;
+    const source = type === 'chance' ? CHANCE_CARDS : COMMUNITY_CHEST_CARDS;
+    if (deck().length === 0) {
+      deck.set(createShuffledDeck(source));
+    }
+    const [card, ...rest] = deck();
+    deck.set(rest);
+    this.pendingCard.set(card);
+    const label = type === 'chance' ? 'Chance' : 'Community Chest';
+    this.addLog(`${this.players().find((p) => p.id === playerId)!.name} drew a ${label} card.`);
+    this.phase.set('card_display');
+  }
+
+  protected resolveCard(): void {
+    const card = this.pendingCard();
+    if (!card) return;
+    const player = this.currentPlayer()!;
+    const effect = card.effect;
+    this.pendingCard.set(null);
+
+    switch (effect.kind) {
+      case 'money':
+        if (effect.amount >= 0) {
+          this.addMoney(player.id, effect.amount);
+          this.addLog(`${player.name} received $${effect.amount}.`);
+        } else {
+          this.deductMoney(player.id, -effect.amount);
+          this.addLog(`${player.name} paid $${-effect.amount}.`);
+        }
+        this.checkBankruptcy();
+        this.phase.set('post_roll');
+        break;
+
+      case 'move_to':
+        this.moveTo(player.id, effect.position, effect.collectGo);
+        break;
+
+      case 'move_by':
+        this.moveBy(player.id, effect.spaces);
+        break;
+
+      case 'go_to_jail':
+        this.sendToJail(player.id);
+        this.phase.set('post_roll');
+        break;
+
+      case 'get_out_of_jail':
+        this.updatePlayer(player.id, {
+          getOutOfJailCards: player.getOutOfJailCards + 1,
+        });
+        this.addLog(`${player.name} received a Get Out of Jail Free card!`);
+        this.phase.set('post_roll');
+        break;
+
+      case 'collect_each': {
+        const others = this.activePlayers().filter((p) => p.id !== player.id);
+        let total = 0;
+        others.forEach((p) => {
+          const paid = Math.min(effect.amount, p.money);
+          this.deductMoney(p.id, paid);
+          total += paid;
+        });
+        this.addMoney(player.id, total);
+        this.addLog(
+          `${player.name} collected $${effect.amount} from each other player ($${total} total).`,
+        );
+        this.checkBankruptcy();
+        this.phase.set('post_roll');
+        break;
+      }
+
+      case 'pay_each': {
+        const others = this.activePlayers().filter((p) => p.id !== player.id);
+        const total = effect.amount * others.length;
+        this.deductMoney(player.id, total);
+        others.forEach((p) => this.addMoney(p.id, effect.amount));
+        this.addLog(`${player.name} paid $${effect.amount} to each other player ($${total} total).`);
+        this.checkBankruptcy();
+        this.phase.set('post_roll');
+        break;
+      }
+
+      case 'nearest_railroad': {
+        const pos = player.position;
+        const nearest = RAILROAD_IDS.find((id) => id > pos) ?? RAILROAD_IDS[0];
+        this.moveTo(player.id, nearest, true);
+        break;
+      }
+
+      case 'nearest_utility': {
+        const pos = player.position;
+        const nearest = UTILITY_IDS.find((id) => id > pos) ?? UTILITY_IDS[0];
+        this.moveTo(player.id, nearest, true);
+        break;
+      }
+    }
+  }
+
+  // ─── Jail ─────────────────────────────────────────────────────────────────
+  private sendToJail(playerId: number): void {
+    const player = this.players().find((p) => p.id === playerId)!;
+    this.addLog(`${player.name} goes to Jail! 🔒`);
+    this.updatePlayer(playerId, { position: 10, inJail: true, jailTurns: 0 });
+    this.consecutiveDoubles.set(0);
+  }
+
+  protected payJailFine(): void {
+    const player = this.currentPlayer()!;
+    if (!player.inJail || player.money < 50) return;
+    this.deductMoney(player.id, 50);
+    this.updatePlayer(player.id, { inJail: false, jailTurns: 0 });
+    this.addLog(`${player.name} paid $50 bail and is free!`);
+  }
+
+  protected useJailCard(): void {
+    const player = this.currentPlayer()!;
+    if (!player.inJail || player.getOutOfJailCards === 0) return;
+    this.updatePlayer(player.id, {
+      inJail: false,
+      jailTurns: 0,
+      getOutOfJailCards: player.getOutOfJailCards - 1,
+    });
+    this.addLog(`${player.name} used a Get Out of Jail Free card!`);
+  }
+
+  // ─── Turn management ──────────────────────────────────────────────────────
+  protected endTurn(): void {
+    if (this.phase() !== 'post_roll') return;
+
+    const current = this.currentPlayer()!;
+
+    // If doubles and player is not (now) in jail: roll again same player
+    if (this.rolledDoubles() && !current.inJail) {
+      this.addLog(`${current.name} rolled doubles — rolls again!`);
+      this.dice.set(null);
+      this.phase.set('pre_roll');
+      return;
+    }
+
+    const active = this.activePlayers();
+    if (active.length <= 1) {
+      this.declareWinner();
+      return;
+    }
+
+    // Advance to next non-bankrupt player
+    let nextIdx = (this.currentIdx() + 1) % this.players().length;
+    while (this.players()[nextIdx].isBankrupt) {
+      nextIdx = (nextIdx + 1) % this.players().length;
+    }
+    this.currentIdx.set(nextIdx);
+    this.dice.set(null);
+    this.phase.set('pre_roll');
+    this.addLog(`👤 It's ${this.players()[nextIdx].name}'s turn.`);
+  }
+
+  // ─── Bankruptcy & winner ──────────────────────────────────────────────────
+  private checkBankruptcy(): void {
+    this.players().forEach((p) => {
+      if (!p.isBankrupt && p.money <= 0) {
+        this.addLog(`💀 ${p.name} is bankrupt and out of the game!`);
+        this.updatePlayer(p.id, { isBankrupt: true, money: 0 });
+        // Return owned properties to the bank
+        const current = { ...this.owned() };
+        p.ownedProperties.forEach((id) => delete current[id]);
+        this.owned.set(current);
+        this.updatePlayer(p.id, { ownedProperties: [] });
+      }
+    });
+    if (this.activePlayers().length <= 1) {
+      this.declareWinner();
+    }
+  }
+
+  private declareWinner(): void {
+    const active = this.activePlayers();
+    if (active.length === 1) {
+      this.winner.set(active[0]);
+      this.addLog(`🏆 ${active[0].name} wins the game!`);
+    }
+    this.phase.set('game_over');
+  }
+
+  protected newGame(): void {
+    this.phase.set('setup');
+  }
+
+  // ─── Player state helpers ─────────────────────────────────────────────────
+  private updatePlayer(id: number, patch: Partial<Player>): void {
+    this.players.update((arr) => arr.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }
+
+  private addMoney(playerId: number, amount: number): void {
+    const p = this.players().find((p) => p.id === playerId)!;
+    this.updatePlayer(playerId, { money: p.money + amount });
+  }
+
+  private deductMoney(playerId: number, amount: number): void {
+    const p = this.players().find((p) => p.id === playerId)!;
+    this.updatePlayer(playerId, { money: Math.max(0, p.money - amount) });
+  }
+
+  private addLog(msg: string): void {
+    this.log.update((arr) => [msg, ...arr].slice(0, 60));
+  }
+
+  // ─── Board grid helpers ───────────────────────────────────────────────────
+  // Board corners (space IDs): Go=0, Jail=10, FreeParking=20, GoToJail=30
+  private static readonly GRID_SIZE = 11; // 11×11 CSS grid
+  private static readonly CORNER_IDS = [0, 10, 20, 30] as const;
+  private static readonly BOTTOM_ROW_END = 10;  // IDs 0–10 on the bottom row
+  private static readonly LEFT_COL_END = 19;    // IDs 11–19 on the left column
+  private static readonly TOP_ROW_END = 30;     // IDs 20–30 on the top row
+  // IDs 31–39 on the right column
+
+  private spaceRow(id: number): number {
+    if (id <= App.BOTTOM_ROW_END) return App.GRID_SIZE;    // bottom row → grid row 11
+    if (id <= App.LEFT_COL_END) return 10 - (id - 11);    // left col  → rows 10 down to 2
+    if (id <= App.TOP_ROW_END) return 1;                   // top row   → grid row 1
+    return id - 29;                                        // right col → rows 2 up to 10
+  }
+
+  private spaceCol(id: number): number {
+    if (id === 0) return App.GRID_SIZE;                    // Go: bottom-right corner (col 11)
+    if (id <= 9) return App.GRID_SIZE - id;                // bottom row: col 10 down to 2
+    if (id <= 20) return 1;                                // left col (incl. corners 10, 20)
+    if (id <= 29) return id - 19;                          // top row: col 2 up to 10
+    if (id === App.TOP_ROW_END) return App.GRID_SIZE;      // Go to Jail: top-right (col 11)
+    return App.GRID_SIZE;                                  // right col
+  }
+
+  private spaceSide(id: number): RenderedSpace['side'] {
+    if ((App.CORNER_IDS as readonly number[]).includes(id)) return 'corner';
+    if (id <= App.BOTTOM_ROW_END) return 'bottom';
+    if (id <= App.LEFT_COL_END) return 'left';
+    if (id <= App.TOP_ROW_END) return 'top';
+    return 'right';
+  }
+
+  // ─── Template helpers ─────────────────────────────────────────────────────
+  protected colorHex(color: string | undefined): string {
+    const map: Record<string, string> = {
+      'brown': '#8B4513',
+      'light-blue': '#87CEEB',
+      'pink': '#FF69B4',
+      'orange': '#FF8C00',
+      'red': '#DC143C',
+      'yellow': '#FFD700',
+      'green': '#228B22',
+      'dark-blue': '#00008B',
+    };
+    return color ? (map[color] ?? 'transparent') : 'transparent';
+  }
+
+  protected spaceIcon(type: string): string {
+    const icons: Record<string, string> = {
+      go: '🚀', railroad: '🚂', utility: '💡',
+      income_tax: '💸', luxury_tax: '💎',
+      chance: '?', community_chest: '🎁',
+      jail: '🔒', go_to_jail: '👮', free_parking: '🚗',
+    };
+    return icons[type] ?? '';
+  }
+
+  protected tokenBg(color: PlayerColor): string {
+    const map: Record<PlayerColor, string> = {
+      red: '#DC143C', blue: '#1565C0', green: '#2E7D32', yellow: '#F9A825',
+    };
+    return map[color];
+  }
+
+  protected trackById(_: number, item: { id: number }): number {
+    return item.id;
   }
 }

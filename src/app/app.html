@@ -1,61 +1,267 @@
-<main class="page-shell">
-  <nav class="breadcrumb-nav" aria-label="Booking workflow steps">
-    <button type="button" (click)="logEnum('Second')">Test</button>
-    <ol class="breadcrumb-list">
-      @for (step of stepCards(); track step.id) {
-        <li
-          class="breadcrumb-item"
-          [class.current]="step.state === 'current'"
-          [class.complete]="step.state === 'complete'"
-          [class.locked]="step.state === 'locked'"
-        >
-          <button
-            type="button"
-            class="breadcrumb-button"
-            [disabled]="step.disabled"
-            (click)="goToStep(step.id)"
-          >
-            <span class="breadcrumb-step">{{ step.id }}. {{ step.title }}</span>
-            <span class="breadcrumb-summary">{{ step.summary }}</span>
-          </button>
-        </li>
-      }
-    </ol>
-  </nav>
+<!-- ─── SETUP SCREEN ─────────────────────────────────────────────────────── -->
+@if (phase() === 'setup') {
+  <div class="setup-screen">
+    <div class="setup-card">
+      <h1 class="mono-title">MONOPOLY</h1>
+      <p class="setup-sub">Choose players and start the game</p>
 
-  <section class="wizard-stage full-width-stage">
-    @switch (activeStep()) {
-      @case (1) {
-        <app-import-step
-          [importControl]="importControl"
-          [parseErrors]="parseErrors()"
-          [canContinue]="canContinueFromImport()"
-          (next)="goToStep(2)"
-        />
+      <div class="setup-section">
+        <label class="setup-label">Number of Players</label>
+        <div class="count-row">
+          @for (n of [2, 3, 4]; track n) {
+            <button
+              type="button"
+              class="count-btn"
+              [class.active]="setupCount() === n"
+              (click)="setCount(n)"
+            >{{ n }}</button>
+          }
+        </div>
+      </div>
+
+      <div class="setup-section">
+        <label class="setup-label">Player Names</label>
+        @for (i of setupCount() === 2 ? [0,1] : setupCount() === 3 ? [0,1,2] : [0,1,2,3]; track i) {
+          <div class="name-row">
+            <span class="player-dot" [style.background]="tokenBg(PLAYER_COLORS[i])"></span>
+            <input
+              class="name-input"
+              type="text"
+              [value]="setupNames()[i]"
+              (input)="updateName(i, $any($event.target).value)"
+              [placeholder]="'Player ' + (i + 1)"
+            />
+          </div>
+        }
+      </div>
+
+      <button type="button" class="start-btn" (click)="startGame()">Start Game 🎲</button>
+    </div>
+  </div>
+}
+
+<!-- ─── GAME SCREEN ──────────────────────────────────────────────────────── -->
+@if (phase() !== 'setup') {
+  <div class="game-layout">
+
+    <!-- ─── BOARD ─────────────────────────────────────────────────────────── -->
+    <div class="board-wrap">
+      <div class="board">
+        <!-- 40 board spaces -->
+        @for (sp of boardSpaces(); track sp.id) {
+          <div
+            class="space"
+            [class.corner]="sp.side === 'corner'"
+            [class.space-top]="sp.side === 'top'"
+            [class.space-left]="sp.side === 'left'"
+            [class.space-right]="sp.side === 'right'"
+            [class.space-bottom]="sp.side === 'bottom'"
+            [class.chance-bg]="sp.type === 'chance'"
+            [class.cc-bg]="sp.type === 'community_chest'"
+            [class.special-bg]="sp.type === 'go' || sp.type === 'go_to_jail' || sp.type === 'free_parking' || sp.type === 'jail'"
+            [style.grid-row]="sp.gridRow"
+            [style.grid-column]="sp.gridCol"
+          >
+            <!-- Color strip for properties -->
+            @if (sp.color) {
+              <div class="color-strip" [style.background]="colorHex(sp.color)">
+                @if (sp.ownerColor) {
+                  <div class="owned-dot" [style.background]="tokenBg(sp.ownerColor)"></div>
+                }
+              </div>
+            }
+
+            <!-- Icon for non-property spaces -->
+            @if (!sp.color) {
+              <div class="space-icon">{{ spaceIcon(sp.type) }}</div>
+            }
+
+            <!-- Space name -->
+            <div class="space-name">{{ sp.name }}</div>
+
+            <!-- Price -->
+            @if (sp.price && !sp.color) {
+              <div class="space-price">${{ sp.price }}</div>
+            }
+
+            <!-- Player tokens -->
+            @if (sp.occupants.length > 0) {
+              <div class="token-row">
+                @for (p of sp.occupants; track p.id) {
+                  <div
+                    class="token"
+                    [style.background]="tokenBg(p.color)"
+                    [title]="p.name"
+                  ></div>
+                }
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Board center -->
+        <div class="board-center">
+          <div class="center-content">
+            <div class="mono-center-title">MONOPOLY</div>
+            @if (pendingRent(); as rent) {
+              <div class="center-info rent-info">
+                💰 Rent paid: ${{ rent.amount }} to {{ rent.toPlayerName }}
+              </div>
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── SIDE PANEL ─────────────────────────────────────────────────────── -->
+    <div class="side-panel">
+
+      <!-- Current Player -->
+      @if (currentPlayer(); as cp) {
+        <div class="panel-card current-player-card">
+          <div class="panel-card-title">Current Turn</div>
+          <div class="player-header">
+            <div class="player-token-lg" [style.background]="tokenBg(cp.color)"></div>
+            <div>
+              <div class="player-name-lg">{{ cp.name }}</div>
+              @if (cp.inJail) {
+                <div class="jail-badge">🔒 In Jail (turn {{ cp.jailTurns + 1 }}/3)</div>
+              }
+            </div>
+            <div class="player-money-lg">${{ cp.money }}</div>
+          </div>
+
+          <!-- Dice display -->
+          @if (dice(); as d) {
+            <div class="dice-row">
+              <div class="die">{{ d[0] }}</div>
+              <div class="die">{{ d[1] }}</div>
+              @if (rolledDoubles()) {
+                <span class="doubles-label">Doubles!</span>
+              }
+            </div>
+          }
+
+          <!-- Action buttons -->
+          <div class="action-btns">
+            @switch (phase()) {
+              @case ('pre_roll') {
+                <!-- Jail actions shown before rolling -->
+                @if (cp.inJail) {
+                  @if (cp.getOutOfJailCards > 0) {
+                    <button class="btn-secondary" type="button" (click)="useJailCard()">
+                      Use Jail Card ({{ cp.getOutOfJailCards }})
+                    </button>
+                  }
+                  @if (cp.money >= 50) {
+                    <button class="btn-secondary" type="button" (click)="payJailFine()">
+                      Pay $50 Bail
+                    </button>
+                  }
+                }
+                <button class="btn-primary" type="button" (click)="rollDice()">
+                  🎲 Roll Dice
+                </button>
+              }
+              @case ('post_roll') {
+                @if (rolledDoubles() && !cp.inJail) {
+                  <button class="btn-primary" type="button" (click)="endTurn()">
+                    🎲 Roll Again (Doubles!)
+                  </button>
+                } @else {
+                  <button class="btn-primary" type="button" (click)="endTurn()">
+                    ➡ End Turn
+                  </button>
+                }
+              }
+              @case ('buy_prompt') {
+                @if (BOARD[cp.position]; as sp) {
+                  <div class="buy-info">
+                    <strong>{{ sp.name }}</strong> — ${{ sp.price }}
+                    @if (cp.money >= (sp.price ?? 0)) {
+                      <div class="buy-afford">You can afford this!</div>
+                    } @else {
+                      <div class="buy-cant">Not enough money!</div>
+                    }
+                  </div>
+                  @if (cp.money >= (sp.price ?? 0)) {
+                    <button class="btn-primary" type="button" (click)="buyProperty()">
+                      🏠 Buy for ${{ sp.price }}
+                    </button>
+                  }
+                  <button class="btn-secondary" type="button" (click)="declineBuy()">
+                    Pass
+                  </button>
+                }
+              }
+              @case ('card_display') {
+                @if (pendingCard(); as card) {
+                  <div class="card-display" [class.chance-card]="card.type === 'chance'" [class.cc-card]="card.type === 'community_chest'">
+                    <div class="card-type-label">{{ card.type === 'chance' ? '? Chance' : '🎁 Community Chest' }}</div>
+                    <div class="card-text">{{ card.text }}</div>
+                  </div>
+                  <button class="btn-primary" type="button" (click)="resolveCard()">OK</button>
+                }
+              }
+              @case ('game_over') {
+                @if (winner(); as w) {
+                  <div class="winner-banner">🏆 {{ w.name }} wins!</div>
+                }
+                <button class="btn-primary" type="button" (click)="newGame()">New Game</button>
+              }
+            }
+          </div>
+        </div>
       }
-      @case (2) {
-        <app-mapping-step
-          [ambiguousRows]="ambiguousResolutionRows()"
-          [mappedCount]="mappedCount()"
-          [blockers]="blockers()"
-          [canContinue]="canContinueFromMapping()"
-          (lineSelected)="selectOrderLine($event)"
-          (back)="goToStep(1)"
-          (next)="goToStep(3)"
-        />
-      }
-      @case (3) {
-        <app-booking-step
-          [resolutionRows]="resolutionRows()"
-          [blockers]="blockers()"
-          [lineCount]="bookingSummary().lineCount"
-          [totalQuantity]="bookingSummary().totalQuantity"
-          [canBook]="readyToBook() && blockers().length === 0"
-          [bookingResult]="bookingResult()"
-          (back)="goToStep(2)"
-          (book)="book()"
-        />
-      }
-    }
-  </section>
-</main>
+
+      <!-- Players list -->
+      <div class="panel-card">
+        <div class="panel-card-title">Players</div>
+        @for (p of players(); track p.id) {
+          <div class="player-row" [class.active-player]="p.id === currentPlayer()?.id" [class.bankrupt]="p.isBankrupt">
+            <div class="player-token-sm" [style.background]="tokenBg(p.color)"></div>
+            <div class="player-row-info">
+              <span class="player-row-name">{{ p.name }}</span>
+              <span class="player-row-pos">📍 {{ BOARD[p.position].name }}</span>
+            </div>
+            <div class="player-row-money" [class.low-money]="p.money < 200">${{ p.money }}</div>
+          </div>
+        }
+      </div>
+
+      <!-- Property ownership summary -->
+      <div class="panel-card">
+        <div class="panel-card-title">Properties</div>
+        <div class="prop-summary">
+          @for (p of activePlayers(); track p.id) {
+            @if (p.ownedProperties.length > 0) {
+              <div class="prop-player-row">
+                <div class="player-token-sm" [style.background]="tokenBg(p.color)"></div>
+                <div class="prop-dots">
+                  @for (id of p.ownedProperties; track id) {
+                    <div
+                      class="prop-dot"
+                      [style.background]="colorHex(BOARD[id].color)"
+                      [title]="BOARD[id].name"
+                    ></div>
+                  }
+                </div>
+              </div>
+            }
+          }
+        </div>
+      </div>
+
+      <!-- Game log -->
+      <div class="panel-card log-card">
+        <div class="panel-card-title">Game Log</div>
+        <div class="log-list">
+          @for (entry of log(); track $index) {
+            <div class="log-entry">{{ entry }}</div>
+          }
+        </div>
+      </div>
+
+    </div>
+  </div>
+}
